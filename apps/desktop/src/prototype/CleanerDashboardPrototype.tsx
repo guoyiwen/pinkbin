@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Archive,
   ArrowRight,
@@ -6,7 +6,6 @@ import {
   Bot,
   Boxes,
   Check,
-  CheckCircle2,
   ChevronRight,
   CircleHelp,
   Clock3,
@@ -34,9 +33,14 @@ import {
   Zap,
   type LucideIcon,
 } from 'lucide-react';
-import { api } from '../api';
-import { buildCleanerReadModel, type CleanerEvidenceSource, type CleanerIconKey, type CleanerReadItem } from '../cleanerReadModel';
-import { isTauri } from '../env';
+import {
+  CleanerWorkflow,
+  displayWindowsScanRoot as displayScanRoot,
+  isWindowsScanRoot,
+  normalizeWindowsScanRoot as normalizeScanRoot,
+  type CleanerWorkflowSnapshot,
+} from '../cleanerWorkflow';
+import { type CleanerEvidenceSource, type CleanerIconKey, type CleanerReadItem } from '../cleanerReadModel';
 import type { Plan, UndoEntry } from '../types';
 import './CleanerDashboardPrototype.css';
 
@@ -46,8 +50,7 @@ import './CleanerDashboardPrototype.css';
 type Surface = 'home' | 'space' | 'packs' | 'history' | 'settings';
 type Risk = 'low' | 'medium' | 'high';
 type CleanupStatus = '等待中' | '执行中' | '已完成' | '已跳过' | '失败';
-type ExecutionState = 'idle' | 'running' | 'success' | 'partial-failure' | 'failure';
-type ExecutionRunStatus = Exclude<ExecutionState, 'idle'>;
+type ExecutionRunStatus = 'running' | 'success' | 'partial-failure' | 'failure';
 
 type ExecutionRun = {
   id: string;
@@ -79,6 +82,13 @@ type CleanupItem = {
   evidence: string[];
   audited: boolean;
   planEligible: boolean;
+  selection: CleanerReadItem['selection'];
+  selectionLabel: string;
+  selectionReason: string;
+  canSelect: boolean;
+  boundary: CleanerReadItem['boundary'];
+  boundaryLabel: string;
+  scopeStatus: CleanerReadItem['scopeStatus'];
   source: CleanerEvidenceSource;
   defaultSelected: boolean;
   status: CleanupStatus;
@@ -86,19 +96,7 @@ type CleanupItem = {
 
 const GB = 1024 ** 3;
 const DEFAULT_SCAN_ROOT = 'C:\\';
-const DEMO_TOTAL_BYTES = 187.1 * GB;
 const CLEANER_SCAN_ROOT_STORAGE_KEY = 'pinkbin.cleaner.scan-root';
-
-function normalizeScanRoot(value: string): string {
-  const normalized = value.trim().replace(/\//g, '\\');
-  if (!normalized) return DEFAULT_SCAN_ROOT;
-  if (/^[A-Za-z]:\\*$/.test(normalized)) return `${normalized.slice(0, 2)}\\`;
-  return normalized.replace(/\\+$/, '');
-}
-
-function isWindowsScanRoot(value: string): boolean {
-  return /^(?:[A-Za-z]:\\|\\\\)/.test(value);
-}
 
 function loadCleanerScanRoot(): string {
   if (typeof window === 'undefined') return DEFAULT_SCAN_ROOT;
@@ -117,141 +115,6 @@ function persistCleanerScanRoot(path: string): void {
     // Local persistence is optional in the prototype shell.
   }
 }
-
-const CLEANUP_ITEMS: CleanupItem[] = [
-  {
-    id: 'browser-cache',
-    title: '浏览器缓存',
-    subtitle: 'Chrome · Edge · 3 个位置',
-    group: 'system',
-    groupLabel: '系统与应用',
-    risk: 'low',
-    label: '可直接清理',
-    size: 18.4 * GB,
-    files: '82,401 个文件',
-    icon: Globe,
-    tone: 'pink',
-    description: 'HTTP、GPU 和代码缓存，浏览器会自动重建。',
-    consequence: '可能需要重新加载部分网页资源，但不会退出账号。',
-    paths: ['C:\\Users\\90740\\AppData\\Local\\Google\\Chrome\\User Data\\Cache', 'C:\\Users\\90740\\AppData\\Local\\Microsoft\\Edge\\User Data\\Cache'],
-    evidence: ['命中 Chrome / Edge Cache 目录', '内容可由浏览器自动重建'],
-    audited: true,
-    planEligible: true,
-    source: 'scaffold',
-    defaultSelected: true,
-    status: '等待中',
-  },
-  {
-    id: 'dev-cache',
-    title: '开发环境缓存',
-    subtitle: 'npm · pnpm · pip · Cargo',
-    group: 'dev',
-    groupLabel: '开发环境',
-    risk: 'low',
-    label: '可直接清理',
-    size: 9.6 * GB,
-    files: '41,206 个文件',
-    icon: Cpu,
-    tone: 'violet',
-    description: '包管理器下载缓存，下一次安装时可以重新获取。',
-    consequence: '下次构建或安装可能重新下载依赖。',
-    paths: ['C:\\Users\\90740\\AppData\\Local\\npm-cache', 'C:\\Users\\90740\\AppData\\Local\\pnpm\\store', 'C:\\Users\\90740\\AppData\\Local\\pip\\cache'],
-    evidence: ['命中 npm / pnpm / pip / Cargo 下载缓存', '内容可在下一次安装时重新获取'],
-    audited: true,
-    planEligible: true,
-    source: 'scaffold',
-    defaultSelected: true,
-    status: '等待中',
-  },
-  {
-    id: 'wechat-media',
-    title: '微信媒体缓存',
-    subtitle: '图片 · 视频 · 接收文件',
-    group: 'app',
-    groupLabel: '应用数据',
-    risk: 'medium',
-    label: '需要确认',
-    size: 7.8 * GB,
-    files: '15,820 个文件',
-    icon: MessageCircle,
-    tone: 'mint',
-    description: '只匹配 FileStorage 中超过 30 天的媒体缓存。',
-    consequence: '旧聊天里的部分媒体可能需要重新下载；聊天数据库保留。',
-    paths: ['C:\\Users\\90740\\Documents\\WeChat Files\\wxid_gmsp9xjx12\\FileStorage\\Image', 'C:\\Users\\90740\\Documents\\WeChat Files\\wxid_gmsp9xjx12\\FileStorage\\Video'],
-    evidence: ['命中 FileStorage/Image、Video', '只处理超过 30 天的媒体缓存'],
-    audited: true,
-    planEligible: true,
-    source: 'scaffold',
-    defaultSelected: false,
-    status: '等待中',
-  },
-  {
-    id: 'steam-shader',
-    title: 'Steam Shader 缓存',
-    subtitle: 'Steam · 4 个游戏',
-    group: 'game',
-    groupLabel: '游戏',
-    risk: 'medium',
-    label: '需要确认',
-    size: 4.3 * GB,
-    files: '6,482 个文件',
-    icon: Gamepad2,
-    tone: 'orange',
-    description: '游戏启动时生成的着色器缓存，可以重新生成。',
-    consequence: '下次启动游戏可能需要重新编译着色器。',
-    paths: ['D:\\SteamLibrary\\steamapps\\shadercache\\730', 'D:\\SteamLibrary\\steamapps\\shadercache\\570'],
-    evidence: ['命中 Steam shadercache 目录', '由 Steam 启动时重新生成'],
-    audited: true,
-    planEligible: true,
-    source: 'scaffold',
-    defaultSelected: false,
-    status: '已跳过',
-  },
-  {
-    id: 'docker-buildx',
-    title: 'Docker Buildx 缓存',
-    subtitle: 'Docker Desktop · 需要检查',
-    group: 'dev',
-    groupLabel: '开发环境',
-    risk: 'high',
-    label: '仅建议查看',
-    size: 5.2 * GB,
-    files: '1,204 个对象',
-    icon: Boxes,
-    tone: 'blue',
-    description: '构建层缓存可能被未来的镜像构建复用。',
-    consequence: '建议优先使用 Docker 自己的 prune 命令，不直接删除 VHDX。',
-    paths: ['C:\\Users\\90740\\AppData\\Local\\Docker\\buildx'],
-    evidence: ['扫描命中 Docker Buildx 路径', '尚未接入安全清理脚本'],
-    audited: false,
-    planEligible: false,
-    source: 'scanned',
-    defaultSelected: false,
-    status: '已跳过',
-  },
-  {
-    id: 'user-media',
-    title: '视频素材',
-    subtitle: 'Documents · 仅建议查看',
-    group: 'media',
-    groupLabel: '用户内容',
-    risk: 'high',
-    label: '仅建议查看',
-    size: 12.1 * GB,
-    files: '2,840 个文件',
-    icon: Film,
-    tone: 'sun',
-    description: '个人录屏和素材，不属于可重建内容。',
-    consequence: '删除后无法由 Pinkbin 恢复，只能从你的备份找回。',
-    paths: ['C:\\Users\\90740\\Documents\\素材', 'D:\\Recordings\\2026'],
-    evidence: ['命中 Documents / Recordings 用户目录', '属于用户内容，不可重建'],
-    audited: false,
-    planEligible: false,
-    source: 'scanned',
-    defaultSelected: false,
-    status: '已跳过',
-  },
-];
 
 const NAV_ITEMS: { id: Surface; label: string; icon: LucideIcon }[] = [
   { id: 'home', label: '首页', icon: LayoutDashboard },
@@ -294,10 +157,6 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024).toFixed(0)} KB`;
 }
 
-function pathKey(path: string): string {
-  return path.replace(/[\\/]+/g, '/').replace(/\/$/, '').toLowerCase();
-}
-
 function executionStatusClass(status: CleanupStatus): string {
   if (status === '执行中') return 'running';
   if (status === '已完成') return 'completed';
@@ -325,35 +184,6 @@ function formatRunTime(timestamp: string): string {
   return date.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
-function buildCleanupPlan(items: CleanupItem[]): Plan {
-  return {
-    action: 'quarantine',
-    paths: [...new Set(items.flatMap((item) => item.paths))],
-    reason: `Pinkbin 深度清理：${items.map((item) => item.title).join('、')}`,
-  };
-}
-
-function mockUndoEntries(plan: Plan): UndoEntry[] {
-  return plan.paths.map((source) => ({
-    timestamp: new Date().toISOString(),
-    action: plan.action,
-    source,
-    destination: `${source} → 隔离区`,
-    reason: `原型执行：${plan.reason}`,
-  }));
-}
-
-async function executePrototypePlan(plan: Plan): Promise<UndoEntry[]> {
-  // The prototype never mutates user files. Browser mode uses the existing mock
-  // executor; a Tauri shell gets the same local result until real execution is
-  // explicitly authorized and wired into the product flow.
-  if (isTauri) {
-    await new Promise<void>((resolve) => window.setTimeout(resolve, 650));
-    return mockUndoEntries(plan);
-  }
-  return api.execute(plan, false);
-}
-
 function riskClass(risk: Risk): string {
   return `cleaner-risk cleaner-risk-${risk}`;
 }
@@ -363,15 +193,12 @@ function RiskLabel({ risk, text }: { risk: Risk; text?: string }) {
   return <span className={riskClass(risk)}>{label}</span>;
 }
 
-function visibleRiskLabel(item: Pick<CleanupItem, 'risk' | 'label' | 'planEligible'>): string {
-  if (!item.planEligible && item.risk !== 'high') return '先检查';
+function visibleRiskLabel(item: Pick<CleanupItem, 'label'>): string {
   return item.label;
 }
 
-function planAccessLabel(item: Pick<CleanupItem, 'risk' | 'planEligible'>): string {
-  if (item.planEligible) return '已满足清理计划入口条件';
-  if (item.risk === 'high') return '风险较高，只能查看';
-  return '尚未接入审核清理规则，只能查看';
+function planAccessLabel(item: Pick<CleanupItem, 'selectionReason'>): string {
+  return item.selectionReason;
 }
 
 function IconTile({ icon: Icon, tone }: { icon: LucideIcon; tone: string }) {
@@ -412,12 +239,41 @@ function CleanerSidebar({ activeSurface, onNavigate, scanRoot, totalBytes }: { a
   );
 }
 
-function ScanStatus({ scanning, onScan, summary }: { scanning: boolean; onScan: () => void; summary: string }) {
+function ScanStatus({ status, onScan, summary, error }: { status: CleanerWorkflowSnapshot['status']; onScan: () => void; summary: string; error: string | null }) {
+  const scanning = status === 'scanning';
+  const statusLabel = status === 'error'
+    ? `扫描失败 · ${error ?? '本地扫描未完成'}`
+    : status === 'empty'
+      ? '扫描完成 · 没有可展示的清理范围'
+      : scanning
+        ? '正在读取本地目录元数据…'
+        : summary;
   return (
     <div className="cleaner-scan-status">
-      <span className={scanning ? 'cleaner-live-dot is-scanning' : 'cleaner-live-dot'} />
-      <span>{scanning ? '正在检查已知安全目录…' : summary}</span>
+      <span className={`${status === 'error' ? 'cleaner-live-dot is-error' : 'cleaner-live-dot'} ${scanning ? 'is-scanning' : ''}`} />
+      <span>{statusLabel}</span>
       <button type="button" onClick={() => onScan()} disabled={scanning}><RefreshCw size={13} /> 重新扫描</button>
+    </div>
+  );
+}
+
+function ScanStatePanel({ status, error, onScan }: { status: CleanerWorkflowSnapshot['status']; error: string | null; onScan: () => void }) {
+  if (status === 'ready') return null;
+  const data = status === 'idle'
+    ? { icon: HardDrive, eyebrow: '本地扫描 · 尚未开始', title: '从一个 Windows 范围开始', copy: '在设置中输入盘符根目录或文件夹，然后启动本地扫描。' }
+    : status === 'scanning'
+    ? { icon: RefreshCw, eyebrow: '本地扫描 · 进行中', title: '正在读取扫描证据', copy: '扫描只读取路径、大小、文件数和扩展名摘要；当前结果会在扫描完成前清空。' }
+    : status === 'error'
+      ? { icon: TriangleAlert, eyebrow: '本地扫描 · 失败', title: '这次扫描没有完成', copy: error ?? '请检查路径是否存在、磁盘是否可访问，修正后重新扫描。' }
+      : { icon: FileSearch, eyebrow: '本地扫描 · 无结果', title: '没有发现可展示的清理范围', copy: '这次扫描没有返回可用于清理工作台的目录证据；可以换一个 Windows 目录重新扫描。' };
+  const Icon = data.icon;
+  return (
+    <div className="cleaner-surface-note" role={status === 'error' ? 'alert' : 'status'}>
+      <Icon size={22} className={status === 'scanning' ? 'cleaner-spin' : undefined} />
+      <span className="cleaner-kicker">{data.eyebrow}</span>
+      <h2>{data.title}</h2>
+      <p>{data.copy}</p>
+      {status !== 'scanning' && <button type="button" className="cleaner-button cleaner-button-primary" onClick={onScan}><RefreshCw size={14} /> {status === 'idle' ? '开始扫描' : '重新扫描'}</button>}
     </div>
   );
 }
@@ -436,14 +292,9 @@ function getInitialSurface(): Surface {
   return 'home';
 }
 
-function displayScanRoot(path: string): string {
-  const drive = path.match(/^([A-Za-z]):[\\/]?$/);
-  return drive ? `Windows (${drive[1].toUpperCase()}:)` : path;
-}
-
 function SelectionButton({ item, selected, onToggle, disabled = false }: { item: CleanupItem; selected: boolean; onToggle: () => void; disabled?: boolean }) {
-  const isDisabled = disabled || item.risk === 'high' || !item.planEligible;
-  const ariaLabel = !item.planEligible ? `暂不可加入清理计划 ${item.title}` : `${selected ? '取消选择' : '选择'} ${item.title}`;
+  const isDisabled = disabled || !item.canSelect;
+  const ariaLabel = !item.canSelect ? `${item.selectionLabel} ${item.title}` : `${selected ? '取消选择' : '选择'} ${item.title}`;
   return (
     <button
       type="button"
@@ -465,7 +316,7 @@ function CompactItemRow({ item, selected, onToggle, onInspect }: { item: Cleanup
       <IconTile icon={item.icon} tone={item.tone} />
       <button type="button" className="cleaner-item-copy" onClick={onInspect}>
         <strong>{item.title}</strong>
-        <span>{item.subtitle}</span>
+        <span>{item.subtitle} · {item.boundaryLabel}</span>
       </button>
       <RiskLabel risk={item.risk} text={visibleRiskLabel(item)} />
       <SizeValue bytes={item.size} />
@@ -477,71 +328,41 @@ function CompactItemRow({ item, selected, onToggle, onInspect }: { item: Cleanup
 function ReviewSheet({
   items,
   selectedIds,
-  executionState,
-  executionItemIds,
-  executionEntries,
-  executionError,
   onToggle,
   onClose,
-  onConfirm,
 }: {
   items: CleanupItem[];
   selectedIds: Set<string>;
-  executionState: ExecutionState;
-  executionItemIds: string[];
-  executionEntries: UndoEntry[];
-  executionError: string | null;
   onToggle: (id: string) => void;
   onClose: () => void;
-  onConfirm: () => void;
 }) {
-  const [safetyConfirmed, setSafetyConfirmed] = useState(false);
-  const reviewIds = executionItemIds.length ? new Set(executionItemIds) : selectedIds;
-  const selected = items.filter((item) => reviewIds.has(item.id));
+  const selected = items.filter((item) => selectedIds.has(item.id));
   const total = selected.reduce((sum, item) => sum + item.size, 0);
   const planPathCount = new Set(selected.flatMap((item) => item.paths)).size;
-  const completedCount = selected.filter((item) => item.status === '已完成').length;
-  const failedCount = selected.filter((item) => item.status === '失败').length;
-  const isRunning = executionState === 'running';
-  const hasResult = executionState !== 'idle';
-  const stateContent: Record<Exclude<ExecutionState, 'idle'>, { title: string; copy: string; icon: LucideIcon }> = {
-    running: { title: '正在隔离清理项', copy: `正在处理 ${selected.length} 个范围，完成后会逐项更新状态。`, icon: RefreshCw },
-    success: { title: '清理计划已完成', copy: `${formatSize(total)} 已进入隔离区；${executionEntries.length} 个路径已完成，恢复入口后续接入。`, icon: CheckCircle2 },
-    'partial-failure': { title: '部分项目未完成', copy: `${completedCount} 个已完成，${failedCount} 个失败项仍保留在计划中。`, icon: TriangleAlert },
-    failure: { title: '执行未完成', copy: executionError ? `这次没有完成任何范围：${executionError}` : '这次没有完成任何范围，失败项仍保留在计划中。', icon: TriangleAlert },
-  };
-  const state = hasResult ? stateContent[executionState] : null;
-  const StateIcon = state?.icon;
-  const actionLabel = executionState === 'partial-failure' || executionState === 'failure' ? '重试失败项' : `隔离 ${selected.length ? formatSize(total) : ''}`;
   const toggleReviewItem = (id: string) => {
-    setSafetyConfirmed(false);
     onToggle(id);
   };
   return (
     <div className="cleaner-sheet-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="cleaner-review-sheet" role="dialog" aria-modal="true" aria-label="复核清理计划" aria-busy={isRunning} onMouseDown={(event) => event.stopPropagation()}>
+      <section className="cleaner-review-sheet" role="dialog" aria-modal="true" aria-label="复核清理计划" onMouseDown={(event) => event.stopPropagation()}>
         <div className="cleaner-sheet-head">
-          <div><span className="cleaner-kicker">{hasResult ? '清理执行' : '最后一步 · 人工审核'}</span><h2>{hasResult ? state?.title : '确认这次清理'}</h2></div>
+          <div><span className="cleaner-kicker">人工审核 · 只读预览</span><h2>查看这次清理</h2></div>
           <button type="button" className="cleaner-icon-button" onClick={onClose} aria-label="关闭复核"><X size={18} /></button>
         </div>
-        <div className="cleaner-review-total"><span>{hasResult ? '本次计划' : '预计可释放'}</span><strong>{formatSize(total)}</strong><small>{hasResult ? `${completedCount} 个完成 · ${failedCount} 个失败 · ${planPathCount} 个路径` : `${selected.length} 个范围 · ${planPathCount} 个路径 · 执行方式：隔离区`}</small></div>
-        {executionState === 'idle' && <label className="cleaner-review-confirm"><input type="checkbox" checked={safetyConfirmed} onChange={(event) => setSafetyConfirmed(event.target.checked)} /><span><strong>我确认只处理以上可重建范围</strong><small>本次只进入隔离区，不会永久删除；路径和清理影响已逐项查看。</small></span></label>}
-        {state && StateIcon && <div className={`cleaner-execution-state cleaner-execution-${executionState}`} role="status"><StateIcon size={17} className={isRunning ? 'cleaner-spin' : undefined} /><span><strong>{state.title}</strong><small>{state.copy}</small></span>{executionState !== 'running' && <b>{completedCount}/{selected.length}</b>}</div>}
+        <div className="cleaner-review-total"><span>预计可释放</span><strong>{formatSize(total)}</strong><small>{selected.length} 个范围 · {planPathCount} 个路径 · 仅展示计划，不执行清理</small></div>
         <div className="cleaner-review-list">
           {selected.length === 0 ? <div className="cleaner-empty-review">没有选择任何项目。回到结果页勾选低风险内容，或只把这次当作查看报告。</div> : selected.map((item) => (
-            <div className={`cleaner-review-row ${hasResult ? `cleaner-review-row-${executionStatusClass(item.status)}` : ''}`} key={item.id}>
-              {hasResult ? <span className={`cleaner-review-status cleaner-review-status-${executionStatusClass(item.status)}`}>{item.status}</span> : <SelectionButton item={item} selected onToggle={() => toggleReviewItem(item.id)} disabled={isRunning} />}
+            <div className="cleaner-review-row" key={item.id}>
+              <SelectionButton item={item} selected onToggle={() => toggleReviewItem(item.id)} />
               <div className="cleaner-review-row-copy"><strong>{item.title}</strong><span>{item.paths[0]}</span><small>{item.consequence}</small></div>
               <SizeValue bytes={item.size} />
             </div>
           ))}
         </div>
         <div className="cleaner-sheet-foot">
-          <span className="cleaner-safe-note"><ShieldCheck size={15} /><span><strong>执行方式：隔离区</strong><small>不读取文件内容 · 永久删除未启用 · 恢复入口后续接入</small></span></span>
+          <span className="cleaner-safe-note"><ShieldCheck size={15} /><span><strong>本轮只读</strong><small>不读取文件内容 · 不移动文件 · 回收站和永久删除未启用</small></span></span>
           <div className="cleaner-sheet-actions">
-            <button type="button" className="cleaner-button cleaner-button-quiet" onClick={onClose}>{isRunning ? '隐藏进度' : hasResult ? '返回工作台' : '继续查看'}</button>
-            {executionState === 'idle' && <button type="button" className="cleaner-button cleaner-button-primary" disabled={!selected.length || !safetyConfirmed} onClick={onConfirm}><Archive size={15} /> {actionLabel}</button>}
-            {(executionState === 'partial-failure' || executionState === 'failure') && <button type="button" className="cleaner-button cleaner-button-primary" disabled={!selectedIds.size || isRunning} onClick={onConfirm}><RefreshCw size={15} /> {actionLabel}</button>}
+            <button type="button" className="cleaner-button cleaner-button-quiet" onClick={onClose}>返回工作台</button>
           </div>
         </div>
       </section>
@@ -641,25 +462,21 @@ function HistoryLog({ runs }: { runs: ExecutionRun[] }) {
   );
 }
 
-function VariantA({ activeSurface, onNavigate, items, selectedIds, onToggle, onInspect, onReview, scanning, onScan, scanRoot, totalBytes, scanSummary, cleaned, cleanedBytes, cleanedCount, executionLog, scanRootPath, onSaveScanRoot }: VariantProps) {
+function VariantA({ activeSurface, onNavigate, items, selectedIds, onToggle, onInspect, onReview, scanning, onScan, scanRoot, totalBytes, scanSummary, executionLog, scanRootPath, onSaveScanRoot, workflowStatus, scanError }: VariantProps) {
   const low = items.filter((item) => item.risk === 'low');
   const medium = items.filter((item) => item.risk === 'medium');
   const high = items.filter((item) => item.risk === 'high');
   const selectedBytes = items.filter((item) => selectedIds.has(item.id)).reduce((sum, item) => sum + item.size, 0);
-  const defaultSelectedBytes = items.filter((item) => item.defaultSelected).reduce((sum, item) => sum + item.size, 0);
-  const completedBytes = cleanedBytes ?? defaultSelectedBytes;
-  const completedCount = cleanedCount ?? items.filter((item) => item.defaultSelected).length;
   return (
     <div className="cleaner-variant cleaner-variant-a">
       <CleanerSidebar activeSurface={activeSurface} onNavigate={onNavigate} scanRoot={scanRoot} totalBytes={totalBytes} />
       <main className="cleaner-a-main">
-        {activeSurface === 'home' && <ScanStatus scanning={scanning} onScan={onScan} summary={scanSummary} />}
+        {activeSurface === 'home' && <ScanStatus status={workflowStatus} onScan={onScan} summary={scanSummary} error={scanError} />}
         {activeSurface !== 'home' ? activeSurface === 'history' ? <HistoryLog runs={executionLog ?? []} /> : activeSurface === 'settings' ? <CleanerSettings scanRootPath={scanRootPath} scanSummary={scanSummary} scanning={scanning} onScan={onScan} onSaveScanRoot={onSaveScanRoot} /> : <SurfaceNote surface={activeSurface} /> : (
-          <>
+          workflowStatus !== 'ready' ? <ScanStatePanel status={workflowStatus} error={scanError} onScan={onScan} /> : <>
             <div className="cleaner-a-heading"><div><span className="cleaner-kicker">今天 · 快速清理</span><h1>你的空间，<em>看懂了。</em></h1><p>发现 {items.length} 个范围，其中 {low.length} 个可以马上释放。</p></div><button type="button" className="cleaner-icon-button cleaner-heading-settings" title="调整扫描范围" onClick={() => onNavigate('settings')}><SlidersHorizontal size={17} /></button></div>
-            {cleaned && <div className="cleaner-success-banner"><CheckCircle2 size={18} /><span><strong>已完成隔离 {completedCount} 个范围</strong><small>{formatSize(completedBytes)} 已进入隔离区 · 恢复入口后续接入</small></span><button type="button" className="cleaner-link-button" onClick={() => onNavigate('packs')}>查看清理计划 <ArrowRight size={13} /></button></div>}
             <section className="cleaner-a-hero">
-              <div><span className="cleaner-hero-label"><ShieldCheck size={15} /> {cleaned ? '本次已隔离' : '可安全释放'}</span><strong className="cleaner-hero-number">{formatSize(cleaned ? completedBytes : selectedBytes)}</strong><p>{cleaned ? `${completedCount} 个范围已进入隔离区` : <>来自 {selectedIds.size} 个低风险可重建范围<br /><span>预计完成后实际数字可能略有变化</span></>}<br />{cleaned && <span>恢复入口后续接入</span>}</p><div className="cleaner-hero-actions"><button type="button" className="cleaner-button cleaner-button-primary" onClick={onReview} disabled={!selectedIds.size || cleaned}><Archive size={15} /> {cleaned ? '本次已完成' : '查看并清理'}</button><button type="button" className="cleaner-button cleaner-button-quiet" onClick={() => onScan()}><RefreshCw size={14} /> 完整扫描</button></div></div>
+              <div><span className="cleaner-hero-label"><ShieldCheck size={15} /> 预计可释放</span><strong className="cleaner-hero-number">{formatSize(selectedBytes)}</strong><p>来自 {selectedIds.size} 个低风险可重建范围<br /><span>扫描总量与预计可释放空间分别计算</span></p><div className="cleaner-hero-actions"><button type="button" className="cleaner-button cleaner-button-primary" onClick={onReview} disabled={!selectedIds.size}><Archive size={15} /> 查看复核计划</button><button type="button" className="cleaner-button cleaner-button-quiet" onClick={() => onScan()}><RefreshCw size={14} /> 完整扫描</button></div></div>
               <div className="cleaner-hero-orbit"><div className="cleaner-hero-orbit-ring"><span>{new Set(low.map((item) => item.group)).size}</span><small>可清理<br />类别</small></div><div className="cleaner-orbit-label cleaner-orbit-top">缓存</div><div className="cleaner-orbit-label cleaner-orbit-right">开发</div><div className="cleaner-orbit-label cleaner-orbit-bottom">残留</div></div>
             </section>
             <div className="cleaner-section-heading"><div><h2>建议先处理</h2><span>这些内容可重建，不会碰你的个人文件</span></div><button type="button" className="cleaner-text-button" onClick={onReview}>查看清单 <ArrowRight size={13} /></button></div>
@@ -674,7 +491,7 @@ function VariantA({ activeSurface, onNavigate, items, selectedIds, onToggle, onI
   );
 }
 
-function VariantB({ activeSurface, onNavigate, items, selectedIds, onToggle, onInspect, onReview, scanning, onScan, scanRoot, totalBytes, scanSummary }: VariantProps) {
+function VariantB({ activeSurface, onNavigate, items, selectedIds, onToggle, onInspect, onReview, scanning, onScan, scanRoot, totalBytes, scanSummary, workflowStatus, scanError }: VariantProps) {
   const [focusId, setFocusId] = useState(items[0]?.id ?? '');
   const focused = items.find((item) => item.id === focusId) ?? items[0];
   const selectedBytes = items.filter((item) => selectedIds.has(item.id)).reduce((sum, item) => sum + item.size, 0);
@@ -699,9 +516,9 @@ function VariantB({ activeSurface, onNavigate, items, selectedIds, onToggle, onI
         <header className="cleaner-b-topbar"><div className="cleaner-topbar-actions"><button type="button" className="cleaner-plain-button"><CircleHelp size={16} /></button><button type="button" className="cleaner-plain-button"><Settings2 size={16} /></button><button type="button" className="cleaner-button cleaner-button-primary" onClick={onReview} disabled={!selectedIds.size}><Archive size={14} /> 清理 {formatSize(selectedBytes)}</button></div></header>
         <main className="cleaner-b-main">
         <div className="cleaner-b-heading"><div><span className="cleaner-kicker">空间分析 · {scanRoot}</span><h1>{formatSize(totalBytes)} <span>已用</span></h1><p>拖动和点击空间块，查看它们的来源与清理建议。</p></div><div className="cleaner-b-scan"><div className="cleaner-b-gauge"><span>{items.length ? Math.round((items.reduce((sum, item) => sum + item.size, 0) / Math.max(totalBytes, 1)) * 100) : 0}%</span></div><span><strong>已扫描</strong><small>{items.length} 个位置 · {scanning ? '扫描中…' : scanSummary}</small></span><button type="button" className="cleaner-plain-button" onClick={() => onScan()}><RefreshCw size={15} /></button></div></div>
-        {activeSurface !== 'space' && activeSurface !== 'home' ? <SurfaceNote surface={activeSurface} /> : (
+        {workflowStatus !== 'ready' ? <ScanStatePanel status={workflowStatus} error={scanError} onScan={onScan} /> : activeSurface !== 'space' && activeSurface !== 'home' ? <SurfaceNote surface={activeSurface} /> : (
           <>
-            <div className="cleaner-b-map-row">{focused ? <><section className="cleaner-space-map"><div className="cleaner-map-label"><span>按占用空间</span><span>点击查看详情</span></div><div className="cleaner-map-grid">{blocks.map((block) => { const item = items.find((entry) => entry.id === block.id)!; return <button type="button" key={block.id} className={`cleaner-map-block cleaner-map-${block.size} cleaner-tone-bg-${item.tone} ${focusId === block.id ? 'is-focus' : ''}`} style={{ gridColumn: block.col, gridRow: block.row }} onClick={() => { setFocusId(block.id); onInspect(item); }}><strong>{block.label}</strong><span>{block.sub}</span><small>{item.planEligible ? selectedIds.has(item.id) ? '已选择' : '可加入计划' : item.risk === 'high' ? '仅查看' : '先检查'}</small></button>; })}</div><div className="cleaner-map-legend"><span><i className="legend-dot legend-safe" />可重建</span><span><i className="legend-dot legend-review" />需要确认</span><span><i className="legend-dot legend-view" />用户内容 / 高风险</span></div></section><aside className="cleaner-b-inspector"><span className="cleaner-kicker">当前选择</span><div className="cleaner-inspector-title"><IconTile icon={focused.icon} tone={focused.tone} /><div><h2>{focused.title}</h2><span>{focused.subtitle}</span></div></div><div className="cleaner-inspector-size"><strong>{formatSize(focused.size)}</strong><span>{focused.files}</span></div><RiskLabel risk={focused.risk} text={visibleRiskLabel(focused)} /><p>{focused.description}</p><div className="cleaner-inspector-impact"><TriangleAlert size={14} /><span>{focused.consequence}</span></div><div className="cleaner-inspector-path"><FolderOpen size={14} /><span>{focused.paths[0]}</span></div><div className="cleaner-inspector-actions">{focused.planEligible ? <button type="button" className={`cleaner-button ${selectedIds.has(focused.id) ? 'cleaner-button-quiet' : 'cleaner-button-primary'}`} onClick={() => onToggle(focused.id)}>{selectedIds.has(focused.id) ? '取消选择' : '加入清理计划'} <ArrowRight size={14} /></button> : <span className="cleaner-inspector-locked"><LockKeyhole size={14} /><span><strong>{focused.risk === 'high' ? '仅建议查看' : '先检查'}</strong><small>{planAccessLabel(focused)}</small></span></span>}<button type="button" className="cleaner-text-button" onClick={() => onInspect(focused)}>查看所有路径</button></div></aside></> : <div className="cleaner-surface-note"><HardDrive size={22} /><span className="cleaner-kicker">空间分析</span><h2>还没有可展示的扫描位置</h2><p>重新扫描后，这里会按占用空间显示目录来源。</p></div>}</div>
+            <div className="cleaner-b-map-row">{focused ? <><section className="cleaner-space-map"><div className="cleaner-map-label"><span>按占用空间</span><span>点击查看详情</span></div><div className="cleaner-map-grid">{blocks.map((block) => { const item = items.find((entry) => entry.id === block.id)!; return <button type="button" key={block.id} className={`cleaner-map-block cleaner-map-${block.size} cleaner-tone-bg-${item.tone} ${focusId === block.id ? 'is-focus' : ''}`} style={{ gridColumn: block.col, gridRow: block.row }} onClick={() => { setFocusId(block.id); onInspect(item); }}><strong>{block.label}</strong><span>{block.sub}</span><small>{item.canSelect ? selectedIds.has(item.id) ? '已选择' : item.selectionLabel : item.selectionLabel}</small></button>; })}</div><div className="cleaner-map-legend"><span><i className="legend-dot legend-safe" />可重建</span><span><i className="legend-dot legend-review" />需要确认</span><span><i className="legend-dot legend-view" />用户内容 / 高风险</span></div></section><aside className="cleaner-b-inspector"><span className="cleaner-kicker">当前选择</span><div className="cleaner-inspector-title"><IconTile icon={focused.icon} tone={focused.tone} /><div><h2>{focused.title}</h2><span>{focused.subtitle}</span></div></div><div className="cleaner-inspector-size"><strong>{formatSize(focused.size)}</strong><span>{focused.files}</span></div><RiskLabel risk={focused.risk} text={visibleRiskLabel(focused)} /><p>{focused.description}</p><div className="cleaner-inspector-impact"><TriangleAlert size={14} /><span>{focused.consequence}</span></div><div className="cleaner-inspector-path"><FolderOpen size={14} /><span>{focused.paths[0]}</span></div><div className="cleaner-inspector-actions">{focused.canSelect ? <button type="button" className={`cleaner-button ${selectedIds.has(focused.id) ? 'cleaner-button-quiet' : 'cleaner-button-primary'}`} onClick={() => onToggle(focused.id)}>{selectedIds.has(focused.id) ? '取消选择' : '加入清理计划'} <ArrowRight size={14} /></button> : <span className="cleaner-inspector-locked"><LockKeyhole size={14} /><span><strong>{focused.selectionLabel}</strong><small>{planAccessLabel(focused)}</small></span></span>}<button type="button" className="cleaner-text-button" onClick={() => onInspect(focused)}>查看所有路径</button></div></aside></> : <div className="cleaner-surface-note"><HardDrive size={22} /><span className="cleaner-kicker">空间分析</span><h2>还没有可展示的扫描位置</h2><p>重新扫描后，这里会按占用空间显示目录来源。</p></div>}</div>
             <div className="cleaner-b-bottom"><div><span className="cleaner-kicker">当前清理计划</span><strong>{formatSize(selectedBytes)}</strong><span>{selectedIds.size} 个可重建范围已选择</span></div><button type="button" className="cleaner-button cleaner-button-primary" onClick={onReview} disabled={!selectedIds.size}>进入复核 <ArrowRight size={14} /></button></div>
           </>
         )}
@@ -711,7 +528,7 @@ function VariantB({ activeSurface, onNavigate, items, selectedIds, onToggle, onI
   );
 }
 
-function VariantC({ activeSurface, onNavigate, items, selectedIds, onToggle, onInspect, onReview, scanning, onScan, scanRoot, totalBytes }: VariantProps) {
+function VariantC({ activeSurface, onNavigate, items, selectedIds, onToggle, onInspect, onReview, scanning, onScan, scanRoot, totalBytes, workflowStatus, scanError }: VariantProps) {
   const [filter, setFilter] = useState<'all' | Risk>('all');
   const [category, setCategory] = useState<string | null>(null);
   const [query, setQuery] = useState('');
@@ -739,7 +556,7 @@ function VariantC({ activeSurface, onNavigate, items, selectedIds, onToggle, onI
       <CleanerSidebar activeSurface={activeSurface} onNavigate={onNavigate} scanRoot={scanRoot} totalBytes={totalBytes} />
       <div className="cleaner-c-workspace">
         <header className="cleaner-c-header"><div className="cleaner-c-title"><PanelLeft size={17} /><div><span className="cleaner-kicker">深度清理 · 审核工作台</span><h1>清理计划</h1></div></div><div className="cleaner-c-header-meta"><span><Clock3 size={14} />扫描于刚刚</span><button type="button" className="cleaner-button cleaner-button-quiet" onClick={() => onScan()}><RefreshCw size={14} /> {scanning ? '扫描中…' : '重新扫描'}</button></div></header>
-        {activeSurface !== 'packs' && activeSurface !== 'home' ? <SurfaceNote surface={activeSurface} /> : (
+        {workflowStatus !== 'ready' ? <ScanStatePanel status={workflowStatus} error={scanError} onScan={onScan} /> : activeSurface !== 'packs' && activeSurface !== 'home' ? <SurfaceNote surface={activeSurface} /> : (
           <main className="cleaner-c-main">
            <aside className="cleaner-c-filter"><div className="cleaner-c-filter-top"><span className="cleaner-kicker">筛选</span><SlidersHorizontal size={15} /></div><div className="cleaner-filter-search"><Search size={14} /><input aria-label="搜索应用或路径" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索应用或路径" /></div>{hasActiveFilters && <div className="cleaner-filter-clear-row"><button type="button" className="cleaner-filter-clear" onClick={clearFilters}>清除筛选</button></div>}<div className="cleaner-c-filter-label">风险</div>{(['all', 'low', 'medium', 'high'] as const).map((value) => <button type="button" key={value} className={filter === value ? 'is-active' : ''} onClick={() => setFilter(value)} aria-pressed={filter === value}><span className={`filter-marker filter-marker-${value}`} />{value === 'all' ? '全部范围' : value === 'low' ? '可直接清理' : value === 'medium' ? '需要确认' : '仅建议查看'}<small>{value === 'all' ? items.length : items.filter((item) => item.risk === value).length}</small></button>)}<div className="cleaner-c-filter-label">类别</div>{GROUPS.map(({ id, label, icon: Icon }) => <button type="button" key={id} className={`cleaner-filter-category ${category === id ? 'is-active' : ''}`} onClick={() => setCategory((current) => current === id ? null : id)} aria-pressed={category === id}><Icon size={14} />{label}<small>{items.filter((item) => item.group === id).length}</small></button>)}<div className="cleaner-c-filter-foot"><LockKeyhole size={13} />系统保护路径已排除</div></aside>
            <section className="cleaner-c-table-section"><div className="cleaner-c-table-head"><div><span className="cleaner-kicker">{visible.length} 个范围 · {activeFilterLabels}</span><h2>逐项审核选择</h2></div><span className="cleaner-report-state"><FileSearch size={14} />扫描证据已载入</span></div><div className="cleaner-c-table"><div className="cleaner-table-header"><span>选择</span><span>范围</span><span>风险</span><span>大小</span><span>状态</span><span /></div>{visible.map((item) => <div className={`cleaner-table-row ${selectedIds.has(item.id) ? 'is-selected' : ''}`} key={item.id}><SelectionButton item={item} selected={selectedIds.has(item.id)} onToggle={() => onToggle(item.id)} /><button type="button" className="cleaner-table-item" onClick={() => onInspect(item)}><IconTile icon={item.icon} tone={item.tone} /><span><strong>{item.title}</strong><small>{item.subtitle}</small></span></button><RiskLabel risk={item.risk} text={visibleRiskLabel(item)} /><SizeValue bytes={item.size} /><span className={`cleaner-task-state cleaner-task-${executionStatusClass(item.status)}`}>{item.status}</span><button type="button" className="cleaner-icon-button" onClick={() => onInspect(item)}><ChevronRight size={15} /></button></div>)}{!visible.length && <div className="cleaner-filter-empty"><Search size={18} /><strong>没有匹配的范围</strong><span>换个关键词或清除当前筛选，查看全部扫描结果。</span><button type="button" className="cleaner-text-button" onClick={clearFilters}>清除筛选</button></div>}</div></section>
@@ -766,9 +583,8 @@ type VariantProps = {
   scanRoot: string;
   totalBytes: number;
   scanSummary: string;
-  cleaned?: boolean;
-  cleanedBytes?: number;
-  cleanedCount?: number;
+  workflowStatus: CleanerWorkflowSnapshot['status'];
+  scanError: string | null;
   executionLog?: ExecutionRun[];
 };
 
@@ -781,7 +597,7 @@ function DetailPopover({ item, onClose, onAsk }: { item: CleanupItem; onClose: (
         <p className="cleaner-detail-description">{item.description}</p>
         <div className="cleaner-detail-impact"><TriangleAlert size={15} /><span><strong>清理后</strong>{item.consequence}</span></div>
         <div className="cleaner-detail-paths"><div className="cleaner-detail-path-label"><FolderOpen size={13} />命中的位置</div>{item.paths.map((path) => <code key={path}>{path}</code>)}</div>
-        <div className={`cleaner-detail-evidence ${item.planEligible ? 'is-eligible' : 'is-blocked'}`}><div className="cleaner-detail-path-label"><FileSearch size={13} />审核证据</div>{item.evidence.map((entry) => <span key={entry}>{entry}</span>)}<strong>{planAccessLabel(item)}</strong></div>
+        <div className={`cleaner-detail-evidence ${item.planEligible ? 'is-eligible' : 'is-blocked'}`}><div className="cleaner-detail-path-label"><FileSearch size={13} />审核证据</div><span>{item.boundaryLabel} · {item.selectionLabel}</span>{item.evidence.map((entry) => <span key={entry}>{entry}</span>)}<strong>{planAccessLabel(item)}</strong></div>
         <div className="cleaner-detail-actions"><button type="button" className="cleaner-button cleaner-button-quiet" onClick={onAsk}><Bot size={15} />询问 AI 为什么</button><button type="button" className="cleaner-button cleaner-button-quiet" onClick={() => { navigator.clipboard?.writeText(item.paths[0]).catch(() => {}); }}>复制路径</button></div>
       </section>
     </div>
@@ -790,53 +606,50 @@ function DetailPopover({ item, onClose, onAsk }: { item: CleanupItem; onClose: (
 
 export function CleanerDashboardPrototype() {
   const [activeSurface, setActiveSurface] = useState<Surface>(getInitialSurface);
-  const [items, setItems] = useState<CleanupItem[]>(CLEANUP_ITEMS);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set(CLEANUP_ITEMS.filter((item) => item.defaultSelected).map((item) => item.id)));
+  const workflowRef = useRef<CleanerWorkflow | null>(null);
+  if (workflowRef.current === null) workflowRef.current = new CleanerWorkflow();
+  const [workflowState, setWorkflowState] = useState<CleanerWorkflowSnapshot>(() => workflowRef.current!.snapshot);
+  const [items, setItems] = useState<CleanupItem[]>([]);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [inspected, setInspected] = useState<CleanupItem | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [scanning, setScanning] = useState(false);
-  const [cleaned, setCleaned] = useState(false);
-  const [executionState, setExecutionState] = useState<ExecutionState>('idle');
-  const [executionItemIds, setExecutionItemIds] = useState<string[]>([]);
-  const [executionEntries, setExecutionEntries] = useState<UndoEntry[]>([]);
-  const [executionLog, setExecutionLog] = useState<ExecutionRun[]>([]);
-  const [executionError, setExecutionError] = useState<string | null>(null);
-  const [cleanedBytes, setCleanedBytes] = useState(0);
-  const [cleanedCount, setCleanedCount] = useState(0);
+  const [executionLog] = useState<ExecutionRun[]>([]);
   const [toast, setToast] = useState<string | null>(null);
   const [scanRootPath, setScanRootPath] = useState(loadCleanerScanRoot);
   const [scanRoot, setScanRoot] = useState(() => displayScanRoot(loadCleanerScanRoot()));
-  const [totalBytes, setTotalBytes] = useState(DEMO_TOTAL_BYTES);
-  const [scanSummary, setScanSummary] = useState('演示数据 · 点击重新扫描读取本地扫描结果');
+  const [totalBytes, setTotalBytes] = useState(0);
+  const [scanSummary, setScanSummary] = useState('尚未扫描 · 选择 Windows 盘符或目录后开始');
   const timerRef = useRef<number | null>(null);
 
   useEffect(() => () => { if (timerRef.current !== null) window.clearTimeout(timerRef.current); }, []);
 
-  const selectedItems = useMemo(() => items.filter((item) => selectedIds.has(item.id)), [items, selectedIds]);
-
-  const resetExecution = () => {
-    setExecutionState('idle');
-    setExecutionItemIds([]);
-    setExecutionEntries([]);
-    setExecutionError(null);
-    setCleaned(false);
-    setCleanedBytes(0);
-    setCleanedCount(0);
-  };
-
-  const updateExecutionRun = (runId: string, patch: Partial<ExecutionRun>) => {
-    setExecutionLog((current) => current.map((run) => run.id === runId ? { ...run, ...patch } : run));
+  const applyWorkflowState = (next: CleanerWorkflowSnapshot) => {
+    setWorkflowState(next);
+    setScanning(next.status === 'scanning');
+    const nextItems = next.model ? cleanupItemsFromReadModel(next.model.items) : [];
+    setItems(nextItems);
+    setSelectedIds(new Set(next.selectedIds));
+    setTotalBytes(next.model?.scannedBytes ?? 0);
+    if (next.scanPath) {
+      setScanRootPath(next.scanPath);
+      setScanRoot(displayScanRoot(next.scanPath));
+    }
+    if (next.status === 'scanning') {
+      setScanSummary('扫描中 · 正在读取本地目录元数据');
+    } else if (next.status === 'ready' && next.model) {
+      setScanSummary(`上次扫描：刚刚 · ${nextItems.length} 个范围 · 总量 ${formatSize(next.model.scannedBytes)} · 预计可释放 ${formatSize(next.model.estimatedReclaimableBytes)}`);
+    } else if (next.status === 'empty') {
+      setScanSummary(`扫描完成：没有发现可展示的清理范围 · 总量 ${formatSize(next.model?.scannedBytes ?? 0)}`);
+    } else if (next.status === 'error') {
+      setScanSummary(`扫描失败：${next.error ?? '本地扫描未完成'}`);
+    }
   };
 
   const toggle = (id: string) => {
     const target = items.find((item) => item.id === id);
-    if (!target || target.risk === 'high' || !target.planEligible || executionState === 'running') return;
-    setSelectedIds((current) => {
-      const next = new Set(current);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-    resetExecution();
+    if (!target || !target.canSelect) return;
+    applyWorkflowState(workflowRef.current!.toggleSelection(id));
   };
 
   const inspect = (item: CleanupItem) => setInspected(item);
@@ -861,106 +674,22 @@ export function CleanerDashboardPrototype() {
 
   const startScan = async (requestedRoot?: string) => {
     if (scanning) return;
-    if (executionState === 'running') {
-      setToast('清理执行中，请先等待完成。');
-      window.setTimeout(() => setToast(null), 2400);
-      return;
-    }
     const scanPath = normalizeScanRoot(requestedRoot ?? scanRootPath);
-    if (!isWindowsScanRoot(scanPath)) {
-      setToast('扫描范围必须是 Windows 路径，例如 C:\\ 或 D:\\Projects。');
-      window.setTimeout(() => setToast(null), 2800);
-      return;
-    }
     setScanning(true);
-    resetExecution();
+    setReviewOpen(false);
     setInspected(null);
     setToast('正在检查已知安全目录…');
-    try {
-      const [node, scaffolds] = await Promise.all([api.scan(scanPath), api.listScaffolds()]);
-      const model = buildCleanerReadModel(node, scaffolds);
-      const nextItems = cleanupItemsFromReadModel(model.items);
-      setItems(nextItems);
-      setSelectedIds(new Set(nextItems.filter((item) => item.defaultSelected).map((item) => item.id)));
-      setScanRootPath(scanPath);
-      setScanRoot(displayScanRoot(scanPath));
+    const result = await workflowRef.current!.scan(scanPath, applyWorkflowState);
+    if (result.status === 'ready' && result.model) {
       persistCleanerScanRoot(scanPath);
-      setTotalBytes(model.totalBytes);
-      setScanSummary(`上次扫描：刚刚 · ${nextItems.length} 个位置已确认`);
-      const availableBytes = nextItems.filter((item) => item.defaultSelected).reduce((sum, item) => sum + item.size, 0);
-      setToast(`扫描完成：发现 ${nextItems.length} 个范围，预计可释放 ${formatSize(availableBytes)}。`);
+      setToast(`扫描完成：发现 ${result.model.items.length} 个范围，预计可释放 ${formatSize(result.model.estimatedReclaimableBytes)}。`);
       window.setTimeout(() => setToast(null), 3200);
-    } catch (error) {
-      setToast(`扫描失败：${String(error)}`);
-      window.setTimeout(() => setToast(null), 4200);
-    } finally {
-      setScanning(false);
-    }
-  };
-  const confirmClean = async () => {
-    if (executionState === 'running' || !selectedItems.length) return;
-
-    const targetIds = selectedItems.map((item) => item.id);
-    const plan = buildCleanupPlan(selectedItems);
-    const targetIdSet = new Set(targetIds);
-    const runId = `run-${Date.now()}`;
-    const startedAt = new Date().toISOString();
-    const run: ExecutionRun = { id: runId, startedAt, status: 'running', plan, itemTitles: selectedItems.map((item) => item.title), entries: [], failedPaths: [] };
-    setExecutionLog((current) => [run, ...current].slice(0, 8));
-    setExecutionItemIds(targetIds);
-    setExecutionEntries([]);
-    setExecutionError(null);
-    setExecutionState('running');
-    setCleaned(false);
-    setCleanedBytes(0);
-    setCleanedCount(0);
-    setItems((current) => current.map((item) => (targetIdSet.has(item.id) ? { ...item, status: '执行中' } : item)));
-    setToast(`正在生成隔离计划：${plan.paths.length} 个路径…`);
-
-    try {
-      const entries = await executePrototypePlan(plan);
-      const completedPaths = new Set(entries.map((entry) => pathKey(entry.source)));
-      const completedItems = selectedItems.filter((item) => item.paths.length > 0 && item.paths.every((path) => completedPaths.has(pathKey(path))));
-      const failedItems = selectedItems.filter((item) => !completedItems.some((completed) => completed.id === item.id));
-      const completedIdSet = new Set(completedItems.map((item) => item.id));
-      const failedIdSet = new Set(failedItems.map((item) => item.id));
-
-      setExecutionEntries(entries);
-      setItems((current) => current.map((item) => {
-        if (completedIdSet.has(item.id)) return { ...item, status: '已完成' };
-        if (failedIdSet.has(item.id)) return { ...item, status: '失败' };
-        return item;
-      }));
-
-      if (!failedItems.length) {
-        const releasedBytes = completedItems.reduce((sum, item) => sum + item.size, 0);
-        setExecutionState('success');
-        updateExecutionRun(runId, { status: 'success', finishedAt: new Date().toISOString(), entries, failedPaths: [] });
-        setSelectedIds((current) => {
-          const next = new Set(current);
-          completedIdSet.forEach((id) => next.delete(id));
-          return next;
-        });
-        setCleaned(true);
-        setCleanedBytes(releasedBytes);
-        setCleanedCount(completedItems.length);
-        setToast(`已完成隔离 ${completedItems.length} 个范围 · 恢复入口后续接入`);
-      } else {
-        setExecutionState(completedItems.length ? 'partial-failure' : 'failure');
-        updateExecutionRun(runId, { status: completedItems.length ? 'partial-failure' : 'failure', finishedAt: new Date().toISOString(), entries, failedPaths: plan.paths.filter((path) => !completedPaths.has(pathKey(path))) });
-        setSelectedIds(new Set(failedItems.map((item) => item.id)));
-        setToast(`已完成 ${completedItems.length} 个范围，${failedItems.length} 个失败项仍保留在计划中。`);
-      }
-      window.setTimeout(() => setToast(null), 3600);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setExecutionEntries([]);
-      setExecutionState('failure');
-      setExecutionError(message);
-      updateExecutionRun(runId, { status: 'failure', finishedAt: new Date().toISOString(), failedPaths: plan.paths, error: message });
-      setItems((current) => current.map((item) => (targetIdSet.has(item.id) ? { ...item, status: '失败' } : item)));
-      setSelectedIds(new Set(targetIds));
-      setToast(`清理执行失败：${message}`);
+    } else if (result.status === 'empty') {
+      persistCleanerScanRoot(scanPath);
+      setToast('扫描完成：没有发现可展示的清理范围。');
+      window.setTimeout(() => setToast(null), 3200);
+    } else if (result.status === 'error') {
+      setToast(`扫描失败：${result.error ?? '本地扫描未完成'}`);
       window.setTimeout(() => setToast(null), 4200);
     }
   };
@@ -975,11 +704,11 @@ export function CleanerDashboardPrototype() {
 
   return (
     <div className="cleaner-prototype-shell">
-      {activeSurface === 'space' && <VariantB activeSurface={activeSurface} onNavigate={navigate} items={items} selectedIds={selectedIds} onToggle={toggle} onInspect={inspect} onReview={() => setReviewOpen(true)} scanning={scanning} onScan={startScan} onSaveScanRoot={saveScanRoot} scanRootPath={scanRootPath} scanRoot={scanRoot} totalBytes={totalBytes} scanSummary={scanSummary} />}
-      {activeSurface === 'packs' && <VariantC activeSurface={activeSurface} onNavigate={navigate} items={items} selectedIds={selectedIds} onToggle={toggle} onInspect={inspect} onReview={() => setReviewOpen(true)} scanning={scanning} onScan={startScan} onSaveScanRoot={saveScanRoot} scanRootPath={scanRootPath} scanRoot={scanRoot} totalBytes={totalBytes} scanSummary={scanSummary} />}
-      {activeSurface !== 'space' && activeSurface !== 'packs' && <VariantA activeSurface={activeSurface} onNavigate={navigate} items={items} selectedIds={selectedIds} onToggle={toggle} onInspect={inspect} onReview={() => setReviewOpen(true)} scanning={scanning} onScan={startScan} onSaveScanRoot={saveScanRoot} scanRootPath={scanRootPath} scanRoot={scanRoot} totalBytes={totalBytes} scanSummary={scanSummary} cleaned={cleaned} cleanedBytes={cleanedBytes} cleanedCount={cleanedCount} executionLog={executionLog} />}
+      {activeSurface === 'space' && <VariantB activeSurface={activeSurface} onNavigate={navigate} items={items} selectedIds={selectedIds} onToggle={toggle} onInspect={inspect} onReview={() => setReviewOpen(true)} scanning={scanning} onScan={startScan} onSaveScanRoot={saveScanRoot} scanRootPath={scanRootPath} scanRoot={scanRoot} totalBytes={totalBytes} scanSummary={scanSummary} workflowStatus={workflowState.status} scanError={workflowState.error} />}
+      {activeSurface === 'packs' && <VariantC activeSurface={activeSurface} onNavigate={navigate} items={items} selectedIds={selectedIds} onToggle={toggle} onInspect={inspect} onReview={() => setReviewOpen(true)} scanning={scanning} onScan={startScan} onSaveScanRoot={saveScanRoot} scanRootPath={scanRootPath} scanRoot={scanRoot} totalBytes={totalBytes} scanSummary={scanSummary} workflowStatus={workflowState.status} scanError={workflowState.error} />}
+      {activeSurface !== 'space' && activeSurface !== 'packs' && <VariantA activeSurface={activeSurface} onNavigate={navigate} items={items} selectedIds={selectedIds} onToggle={toggle} onInspect={inspect} onReview={() => setReviewOpen(true)} scanning={scanning} onScan={startScan} onSaveScanRoot={saveScanRoot} scanRootPath={scanRootPath} scanRoot={scanRoot} totalBytes={totalBytes} scanSummary={scanSummary} workflowStatus={workflowState.status} scanError={workflowState.error} executionLog={executionLog} />}
       {inspected && <DetailPopover item={inspected} onClose={() => setInspected(null)} onAsk={askAi} />}
-      {reviewOpen && <ReviewSheet items={items} selectedIds={selectedIds} executionState={executionState} executionItemIds={executionItemIds} executionEntries={executionEntries} executionError={executionError} onToggle={toggle} onClose={() => setReviewOpen(false)} onConfirm={confirmClean} />}
+      {reviewOpen && <ReviewSheet items={items} selectedIds={selectedIds} onToggle={toggle} onClose={() => setReviewOpen(false)} />}
       {toast && <div className="cleaner-prototype-toast"><Sparkles size={14} />{toast}</div>}
     </div>
   );
