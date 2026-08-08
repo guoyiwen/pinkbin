@@ -160,6 +160,7 @@ export function buildQuickActions(context: ScanContext): QuickAction[] {
 function isProtectedPath(path: string): boolean {
   const normalized = pathKey(path);
   return [
+    /\/users\/[^/]+\/(?:desktop|documents|downloads|pictures|music|videos)(?:\/|$)/,
     /\/windows(?:\/|$)/,
     /\/program files(?: \(x86\))?(?:\/|$)/,
     /\/programdata(?:\/|$)/,
@@ -167,13 +168,15 @@ function isProtectedPath(path: string): boolean {
     /\/boot(?:\/|$)/,
     /\/\$recycle\.bin(?:\/|$)/,
     /\/system volume information(?:\/|$)/,
-    /\/users\/[^/]+\/(?:desktop|documents|downloads|pictures|music|videos)(?:\/|$)/,
   ].some((pattern) => pattern.test(normalized));
 }
 
+function isUserContentPath(path: string): boolean {
+  return /\/users\/[^/]+\/(?:desktop|documents|downloads|pictures|music|videos)(?:\/|$)/i.test(pathKey(path));
+}
+
 function protectedReason(path: string): string {
-  const normalized = pathKey(path);
-  if (/\/users\/[^/]+\/(?:desktop|documents|downloads|pictures|music|videos)(?:\/|$)/.test(normalized)) {
+  if (isUserContentPath(path)) {
     return '用户资料目录，不能仅凭占用大小判断是否可删除。';
   }
   return '系统目录或系统保留目录，不提供直接删除建议。';
@@ -213,6 +216,8 @@ function localCandidateFor(entry: ScanEntry, context: ScanContext): CleanupCandi
       suggested_handling: keep ? 'keep' : 'studio_scope_preview',
       evidence: [...baseEvidence, `audited_scaffold:${matchedScaffold.id}`],
       audited_scaffold: true,
+      boundary: 'audited-scope',
+      scope_status: 'stable',
       reason: keep
         ? `${matchedScaffold.name} 风险较高，只能先保留并人工确认。`
         : `${matchedScaffold.name} 已有已审核清理脚本，可在 Studio 中查看 scope 预览。`,
@@ -234,6 +239,8 @@ function localCandidateFor(entry: ScanEntry, context: ScanContext): CleanupCandi
       suggested_handling: 'keep',
       evidence: baseEvidence,
       audited_scaffold: false,
+      boundary: isUserContentPath(entry.path) ? 'user-content' : 'system-protected',
+      scope_status: 'none',
       reason: protectedReason(entry.path),
       scaffold_id: entry.scaffold_id ?? null,
       source: 'scanned',
@@ -253,6 +260,8 @@ function localCandidateFor(entry: ScanEntry, context: ScanContext): CleanupCandi
       suggested_handling: 'inspect_in_explorer',
       evidence: [...baseEvidence, `detected_scaffold:${detectedScaffold.id}`, 'cleanup_script:not_connected'],
       audited_scaffold: false,
+      boundary: 'experimental-scope',
+      scope_status: 'experimental',
       reason: `${detectedScaffold.name} 已发现，但当前未接入安全清理脚本，只能人工检查。`,
       scaffold_id: detectedScaffold.id,
       source: 'scanned',
@@ -265,15 +274,17 @@ function localCandidateFor(entry: ScanEntry, context: ScanContext): CleanupCandi
     kind: entry.kind,
     size_bytes: entry.size_bytes,
     file_count: entry.file_count,
-    risk: 'medium',
-    status: 'inspect',
-    method: 'manual',
-    suggested_handling: 'inspect_in_explorer',
-    evidence: baseEvidence,
+    risk: 'high',
+    status: 'keep',
+    method: 'keep',
+    suggested_handling: 'keep',
+    evidence: [...baseEvidence, 'classification:unknown'],
     audited_scaffold: false,
+    boundary: 'unknown',
+    scope_status: 'none',
     reason: looksLikeCacheOrBuild(entry.path)
-      ? '目录名像缓存或开发产物，但当前没有已审核清理脚本，先检查再处理。'
-      : '仅凭目录元数据不能确认是否可删除，先查看内容和所属应用。',
+      ? '目录名像缓存或开发产物，但没有已审核规则支持；这是未知项，只能查看。'
+      : '仅凭目录元数据不能确认身份、归属或后果；这是未知项，只能查看。',
     scaffold_id: entry.scaffold_id ?? null,
     source: 'scanned',
   };

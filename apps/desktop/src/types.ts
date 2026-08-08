@@ -99,6 +99,13 @@ export interface QuickAction {
 export type CleanupCandidateStatus = 'preview' | 'inspect' | 'keep';
 export type CleanupCandidateMethod = 'scaffold' | 'manual' | 'keep';
 export type CleanupCandidateHandling = 'studio_scope_preview' | 'inspect_in_explorer' | 'keep';
+export type CleanupCandidateBoundary =
+  | 'audited-scope'
+  | 'experimental-scope'
+  | 'user-content'
+  | 'system-protected'
+  | 'unknown';
+export type CleanupScopeStatus = 'stable' | 'experimental' | 'none';
 
 export interface CleanupCandidate {
   path: string;
@@ -112,6 +119,8 @@ export interface CleanupCandidate {
   suggested_handling: CleanupCandidateHandling;
   evidence: string[];
   audited_scaffold: boolean;
+  boundary: CleanupCandidateBoundary;
+  scope_status: CleanupScopeStatus;
   reason: string;
   scaffold_id?: string | null;
   source: 'scanned' | 'scaffold';
